@@ -1,6 +1,6 @@
 # Phase 1b : invariants de la base
 
-Rédigé le 2026-10-13, après la revue du schéma (`docs/01b-arbitrage.md`). Chaque invariant a un numéro, repris dans les commentaires de `db/schema.sql`. Second passage le même jour, après réception du rapport du relecteur : I2 et I33 passent en SQL, I25 couvre `value_status`, I50 à I59 sont ajoutés. Le 2026-10-14 : I53 et I54 révisés, I60 ajouté, I26 et I50 vérifiés par la relecture des bruts (D30, D31).
+Rédigé le 2026-10-13, après la revue du schéma (`docs/01b-arbitrage.md`). Chaque invariant a un numéro, repris dans les commentaires de `db/schema.sql`. Second passage le même jour, après réception du rapport du relecteur : I2 et I33 passent en SQL, I25 couvre `value_status`, I50 à I59 sont ajoutés. Le 2026-10-14 : I53 et I54 révisés, I60 ajouté, I26 et I50 vérifiés par la relecture des bruts (D30, D31). Le 2026-10-14 (amendement du schéma, D33) : I36 révisé, I61 et I62 ajoutés.
 
 ## Règle de placement (décision D25)
 
@@ -84,9 +84,11 @@ Colonnes des tableaux :
 | N° | Invariant | Où | Pourquoi là | Vérification |
 |---|---|---|---|---|
 | I35 | Méthode `llm` ⇒ statut `incertain` ou `valide`, jamais `auto` (règle de CONTEXTE) | SQL `CHECK` | Une ligne | CE-D3 |
-| I36 | Un seul chiffre par (version brute, rapport, pays ou ensemble, mesure, définition, période) | SQL index unique sur expression (`COALESCE` pour que deux NULL se heurtent) | Unicité | CE-D4 ; `tests/test_chiffres.py::test_un_chiffre_par_pays_et_par_mesure` (CE-D1) |
+| I36 | Un seul chiffre par (version brute, rapport, pays ou ensemble, mesure, définition, période, **rôle de précision**). Rôles : `fourchette_basse`, `fourchette_haute`, et `point` pour `exact`, `environ`, `au_moins`, `au_plus`. Les deux bornes d'une fourchette coexistent ; un même chiffre n'a qu'une lecture ponctuelle (D33). « Cumulé ou nouveau » n'a pas de colonne : il est porté par `period_start` (NULL = depuis le début de l'événement) | SQL index unique sur expression (`COALESCE` pour que deux NULL se heurtent ; `CASE` pour le rôle) | Unicité | CE-D4 ; `tests/test_chiffres.py::test_un_chiffre_par_pays_et_par_mesure` (CE-D1), `::test_doublon_exact_rejete`, `::test_deux_bornes_d_une_fourchette_coexistent`, `::test_un_meme_chiffre_n_a_qu_une_lecture_ponctuelle` |
 | I37 | `value ≥ 0` ; `period_start ≤ as_of` ; `evidence` non vide | SQL `CHECK` | Une ligne | `tests/test_schema.py::test_contrainte[I37]` |
 | I38 | `figures_payload_id` et `figures_extractor_version` sont renseignés ensemble (NULL = jamais traité) | SQL `CHECK` | Une ligne | `tests/test_schema.py::test_contrainte[I38]` |
+| I61 | **Fourchette** : pour une même fourchette (version brute, rapport, pays ou ensemble, mesure, qualificatif `case_definition`, `period_start` et `as_of`, donc cumulé ou nouveau), la valeur de la borne basse est inférieure ou égale à celle de la borne haute. Python : l'extracteur n'écrit jamais une fourchette inversée (à écrire avec l'extracteur) ; vue `controle_invariants` : ligne `I61` sur la borne basse fautive | Python + vue | Règle entre deux lignes (trigger refusé, D15) ; rapprocher deux lignes en `CHECK` exigerait de dénormaliser | `tests/test_chiffres.py::test_fourchette_borne_basse_inferieure_ou_egale` |
+| I62 | `precision` est renseignée, sans valeur par défaut, et vaut `exact`, `environ`, `au_moins`, `au_plus`, `fourchette_basse` ou `fourchette_haute` | SQL `NOT NULL` + `CHECK` | Une ligne | `tests/test_chiffres.py::test_precision_sans_valeur_par_defaut`, `::test_precision_hors_liste_rejetee`, `::test_les_six_precisions_sont_acceptees` |
 
 ## 7. Classification
 
@@ -139,9 +141,9 @@ Colonnes des tableaux :
 
 | Placement | Invariants |
 |---|---|
-| SQL seul | I4, I5, I7, I12, I13, I14, I17, I18, I19, I20, I23, I27, I30, I32, I33, I35, I36, I37, I38, I39, I42, I44, I47, I48, I49, I53, I55, I59 (28) |
+| SQL seul | I4, I5, I7, I12, I13, I14, I17, I18, I19, I20, I23, I27, I30, I32, I33, I35, I36, I37, I38, I39, I42, I44, I47, I48, I49, I53, I55, I59, I62 (29) |
 | SQL et Python | I2, I8, I10, I29, I40, I51, I54, I60 (8) |
-| Python + vue `controle_invariants` | I6, I9, I15, I16, I21, I22, I24, I25, I28, I31, I41, I56, plus I10, I29, I51 et I54 (12 en propre) |
+| Python + vue `controle_invariants` | I6, I9, I15, I16, I21, I22, I24, I25, I28, I31, I41, I56, I61, plus I10, I29, I51 et I54 (13 en propre) |
 | Python + contrôle de relecture des bruts (D31) | I26, I50 (2) |
 | Python seul (test ; I1 et I58 aussi contrôlés avant envoi) | I1, I3, I11, I34, I43, I45, I46, I52, I57, I58 (10) |
 

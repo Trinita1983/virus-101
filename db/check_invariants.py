@@ -176,8 +176,9 @@ def build_base(conn: sqlite3.Connection, new: bool) -> None:
         conn.execute("UPDATE reports SET figures_payload_id = 2, figures_extractor_version = 'regle-0' WHERE id = 2")
         conn.executemany(
             """INSERT INTO report_figures (report_id, raw_payload_id, country_iso3, measure, case_definition,
-                                           period_start, as_of, value, method, status, evidence, extractor_version)
-               VALUES (2, 2, ?, 'cas', 'confirme', NULL, ?, ?, 'regle', 'auto', ?, 'regle-0')""",
+                                           precision, period_start, as_of, value, method, status, evidence,
+                                           extractor_version)
+               VALUES (2, 2, ?, 'cas', 'confirme', 'exact', NULL, ?, ?, 'regle', 'auto', ?, 'regle-0')""",
             [("BDI", "2024-08-17", 142, "Of 358 suspected cases tested, 142 (39.7%) tested positive for MPXV."),
              ("KEN", "2024-08-13", 1, "one case had tested positive for MPXV Clade Ib")],
         )
@@ -364,7 +365,7 @@ ECART_NEW = ("SELECT g.id AS derniere_execution, g.expected_count AS total_api, 
              "       g.absent_count, g.removed_count\n"
              "FROM ingestion_runs AS g WHERE g.id = (SELECT max(id) FROM ingestion_runs WHERE source_code = 'oms_don');")
 FIG = ("INSERT INTO report_figures (report_id, raw_payload_id, country_iso3, measure, case_definition,\n"
-       "    period_start, as_of, value, method, status, evidence, extractor_version)\nVALUES ({v});")
+       "    precision, period_start, as_of, value, method, status, evidence, extractor_version)\nVALUES ({v});")
 ALERT = ("INSERT INTO alerts_log (alert_type, channel, dedup_key, anomaly_id, report_id, run_id, message,\n"
          "    status, attempts, created_at, sent_at, last_error)\nVALUES ({v});")
 
@@ -563,13 +564,13 @@ CASES: list[Case] = [
     Case("X7", "B-références", "Chiffre lu dans la version d'un autre DON", "I16",
          "Sans objet dans l'ancien schéma (pas de lien chiffre → version brute).",
          None,
-         [FIG.format(v="2, 1, 'BDI', 'deces', 'confirme', NULL, '2024-08-17', 0, 'regle', 'auto', "
+         [FIG.format(v="2, 1, 'BDI', 'deces', 'confirme', 'exact', NULL, '2024-08-17', 0, 'regle', 'auto', "
                        "'No deaths were reported as of 17 August.', 'regle-0'")],
          "vue", "tests/test_chiffres.py::test_chiffre_rattache_a_une_version_de_son_don"),
     Case("X8", "B-références", "Chiffre pour un pays que le DON ne cite pas", "I17",
          "Sans objet dans l'ancien schéma (pas de chiffre par pays).",
          None,
-         [FIG.format(v="2, 2, 'UGA', 'cas', 'confirme', NULL, '2024-08-12', 2, 'regle', 'auto', "
+         [FIG.format(v="2, 2, 'UGA', 'cas', 'confirme', 'exact', NULL, '2024-08-12', 2, 'regle', 'auto', "
                        "'two of which tested positive for MPXV Clade Ib', 'regle-0'")],
          "rejete", "(contrainte SQL)"),
 
@@ -616,9 +617,9 @@ CASES: list[Case] = [
           "    figures_status = 'auto', figures_evidence = 'Kenya' WHERE slug = '2024-DON528';",
           "UPDATE reports SET cases = 4, deaths = 0, figures_as_of = '2024-08-07', figures_method = 'regle',\n"
           "    figures_status = 'auto', figures_evidence = 'Rwanda' WHERE slug = '2024-DON528';"],
-         [FIG.format(v="2, 2, 'RWA', 'cas', 'confirme', NULL, '2024-08-07', 4, 'regle', 'auto', "
+         [FIG.format(v="2, 2, 'RWA', 'cas', 'confirme', 'exact', NULL, '2024-08-07', 4, 'regle', 'auto', "
                        "'four confirmed mpox cases and zero deaths', 'regle-0'"),
-          FIG.format(v="2, 2, 'RWA', 'deces', 'confirme', NULL, '2024-08-07', 0, 'regle', 'auto', "
+          FIG.format(v="2, 2, 'RWA', 'deces', 'confirme', 'exact', NULL, '2024-08-07', 0, 'regle', 'auto', "
                        "'four confirmed mpox cases and zero deaths', 'regle-0'")],
          "coherent", "tests/test_chiffres.py::test_un_chiffre_par_pays_et_par_mesure",
          old_show=["SELECT slug, cases, deaths, figures_as_of, figures_evidence FROM reports WHERE slug = '2024-DON528';"],
@@ -634,15 +635,15 @@ CASES: list[Case] = [
          "Règle de CONTEXTE ; déjà appliquée par l'ancien schéma, conservée.",
          ["UPDATE reports SET cases = 10, figures_method = 'llm', figures_status = 'auto',\n"
           "    figures_evidence = 'x' WHERE slug = '2026-DON620';"],
-         [FIG.format(v="1, 1, 'RUS', 'deces', 'total', NULL, '2026-10-02', 1, 'llm', 'auto', "
+         [FIG.format(v="1, 1, 'RUS', 'deces', 'total', 'exact', NULL, '2026-10-02', 1, 'llm', 'auto', "
                        "'confirmed the death', 'llm-0'")],
          "rejete", "(contrainte SQL)"),
     Case("D4", "D", "Chiffre « ensemble du rapport » en double", "I36",
          "Sans objet dans l'ancien schéma. Montre l'utilité du COALESCE dans l'index unique (NULL ≠ NULL).",
          None,
-         [FIG.format(v="3, 3, NULL, 'cas', 'total', '2022-01-01', '2022-07-10', 7796, 'regle', 'auto', "
+         [FIG.format(v="3, 3, NULL, 'cas', 'total', 'exact', '2022-01-01', '2022-07-10', 7796, 'regle', 'auto', "
                        "'a cumulative number of 7796 cases of cholera', 'regle-0'"),
-          FIG.format(v="3, 3, NULL, 'cas', 'total', '2022-01-01', '2022-07-10', 7796, 'regle', 'auto', "
+          FIG.format(v="3, 3, NULL, 'cas', 'total', 'exact', '2022-01-01', '2022-07-10', 7796, 'regle', 'auto', "
                        "'a cumulative number of 7796 cases of cholera', 'regle-0'")],
          "rejete", "(contrainte SQL)"),
 
@@ -862,13 +863,13 @@ REVIEW_CASES: list[Case] = [
           f"UPDATE reports SET figures_payload_id = raw_payload_id, figures_extractor_version = 'regle-0'\n"
           f"WHERE id = {DON528};",
           "INSERT INTO report_figures (report_id, raw_payload_id, country_iso3, measure, case_definition,\n"
-          "    as_of, value, method, status, evidence, extractor_version)\n"
-          "SELECT id, raw_payload_id, 'BDI', 'cas', 'suspect', '2024-08-17', 474, 'regle', 'auto',\n"
+          "    precision, as_of, value, method, status, evidence, extractor_version)\n"
+          "SELECT id, raw_payload_id, 'BDI', 'cas', 'suspect', 'exact', '2024-08-17', 474, 'regle', 'auto',\n"
           "    '474 suspected cases (86.9%) had been investigated and validated', 'regle-0'\n"
           "FROM reports WHERE slug = '2024-DON528';",
           "INSERT INTO report_figures (report_id, raw_payload_id, country_iso3, measure, case_definition,\n"
-          "    as_of, value, method, status, evidence, extractor_version)\n"
-          "SELECT id, raw_payload_id, 'BDI', 'cas', 'confirme', '2024-08-17', 142, 'regle', 'auto',\n"
+          "    precision, as_of, value, method, status, evidence, extractor_version)\n"
+          "SELECT id, raw_payload_id, 'BDI', 'cas', 'confirme', 'exact', '2024-08-17', 142, 'regle', 'auto',\n"
           "    'Of 358 suspected cases tested, 142 (39.7%) tested positive for MPXV.', 'regle-0'\n"
           "FROM reports WHERE slug = '2024-DON528';"],
          "coherent", "tests/test_chiffres.py::test_un_chiffre_par_pays_et_par_mesure",

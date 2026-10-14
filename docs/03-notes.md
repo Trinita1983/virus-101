@@ -1,6 +1,6 @@
 # Phase 3 : notes
 
-Rédigé le 2026-10-14. Rien dans le schéma n'a été modifié.
+Rédigé le 2026-10-14. Le schéma n'a pas été modifié par ce constat ; l'amendement décidé ensuite est décrit en §1 et dans D33.
 
 ## 1. Le schéma peut-il stocker la précision d'un chiffre ? Non
 
@@ -10,7 +10,7 @@ Rédigé le 2026-10-14. Rien dans le schéma n'a été modifié.
 2. **Une fourchette ne peut pas être stockée en deux lignes.** L'index unique `report_figures_one_value` (I36) porte sur (version brute, rapport, pays, mesure, définition, `period_start`, `as_of`). Les deux bornes d'une fourchette ont les mêmes valeurs pour toutes ces colonnes : la seconde insertion est refusée. Une borne serait donc perdue ou écrasée.
 3. `case_definition` décrit le type de cas (confirmé, suspect...), pas la précision du nombre : y loger `environ` mélangerait deux notions.
 
-**Proposition** (à valider ; non appliquée). Ajouter la colonne et l'inclure dans l'unicité :
+**Proposition** (décidée et appliquée le 2026-10-14, voir D33 dans `docs/01-decisions.md` ; l'index appliqué est plus strict : la précision y entre sous forme de rôle `fourchette_basse` / `fourchette_haute` / `point`, sans défaut `exact`) : Ajouter la colonne et l'inclure dans l'unicité :
 
 ```sql
 ALTER TABLE report_figures ADD COLUMN precision TEXT NOT NULL DEFAULT 'exact'

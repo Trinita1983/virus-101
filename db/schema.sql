@@ -286,6 +286,13 @@ CREATE TABLE report_figures (
     measure           TEXT NOT NULL CHECK (measure IN ('cas', 'deces')),
     case_definition   TEXT NOT NULL
         CHECK (case_definition IN ('total', 'confirme', 'probable', 'suspect', 'non_precise')),
+    -- Précision du nombre tel qu'écrit dans le texte (D33) : « about 200 » -> 'environ', « at least
+    -- 40 » -> 'au_moins', « up to 30 » -> 'au_plus', « between 120 and 150 » -> deux lignes,
+    -- 'fourchette_basse' (120) et 'fourchette_haute' (150). Pas de valeur par défaut : l'extraction
+    -- doit toujours la renseigner.
+    precision         TEXT NOT NULL
+        CHECK (precision IN ('exact', 'environ', 'au_moins', 'au_plus',
+                             'fourchette_basse', 'fourchette_haute')),    -- I62
     period_start      TEXT CHECK (period_start IS date(period_start)),   -- NULL : depuis le début de l'événement
     as_of             TEXT CHECK (as_of IS date(as_of)),          -- date « au ... » citée ; NULL : non citée
     value             INTEGER NOT NULL CHECK (value >= 0),           -- I37
@@ -302,9 +309,13 @@ CREATE TABLE report_figures (
 
 -- I36 : un seul chiffre par version, pays (ou ensemble), mesure, définition et période.
 -- COALESCE : sans lui, deux lignes « ensemble du rapport » (NULL) ne se heurteraient pas.
+-- La précision entre dans la clé sous forme de « rôle » (D33) : les deux bornes d'une fourchette
+-- ont chacune leur rôle et coexistent ; exact, environ, au_moins et au_plus partagent le rôle
+-- 'point', donc un même chiffre ne peut avoir qu'une seule de ces lectures.
 CREATE UNIQUE INDEX report_figures_one_value ON report_figures (
     raw_payload_id, report_id, COALESCE(country_iso3, ''), measure, case_definition,
-    COALESCE(period_start, ''), COALESCE(as_of, ''));
+    COALESCE(period_start, ''), COALESCE(as_of, ''),
+    (CASE WHEN precision IN ('fourchette_basse', 'fourchette_haute') THEN precision ELSE 'point' END));
 CREATE INDEX report_figures_by_report ON report_figures (report_id);
 
 
@@ -683,6 +694,17 @@ SELECT 'I31', 'observations', o.id
 FROM observations AS o
 JOIN series AS s ON s.id = o.series_id
 WHERE (s.period_type = 'annee') <> (o.iso_week IS NULL)
+UNION ALL
+-- I61 : pour une même fourchette, la borne basse est inférieure ou égale à la borne haute
+SELECT 'I61', 'report_figures', lo.id
+FROM report_figures AS lo
+JOIN report_figures AS hi
+  ON hi.raw_payload_id = lo.raw_payload_id AND hi.report_id = lo.report_id
+ AND hi.country_iso3 IS lo.country_iso3 AND hi.measure = lo.measure
+ AND hi.case_definition = lo.case_definition
+ AND hi.period_start IS lo.period_start AND hi.as_of IS lo.as_of
+WHERE lo.precision = 'fourchette_basse' AND hi.precision = 'fourchette_haute'
+  AND lo.value > hi.value
 UNION ALL
 -- I41 : portée géographique cohérente avec les pays listés
 SELECT 'I41', 'reports', r.id

@@ -183,9 +183,9 @@ def insert_dons(conn: sqlite3.Connection, records: list[dict[str, Any]], run_id:
             for measure, value in (("cas", fig["cases"]), ("deces", fig["deaths"])):
                 conn.execute(
                     """INSERT INTO report_figures (report_id, raw_payload_id, country_iso3, measure,
-                                                   case_definition, as_of, value, method, status, evidence,
-                                                   extractor_version)
-                       VALUES (?, ?, ?, ?, 'confirme', ?, ?, 'manuel', 'valide', ?, 'manuel')""",
+                                                   case_definition, precision, as_of, value, method, status,
+                                                   evidence, extractor_version)
+                       VALUES (?, ?, ?, ?, 'confirme', 'exact', ?, ?, 'manuel', 'valide', ?, 'manuel')""",
                     (report_id, raw_id, fig["country"], measure, fig["as_of"], value, fig["evidence"]),
                 )
 
@@ -403,9 +403,9 @@ VALUES (?, '2026-09-28', '2026-10-04', 2026, 40, 2, 71, ?, ?, ?);""",
         )
         expect_error(
             rep, conn, "Chiffres extraits par LLM marqués « auto »",
-            """INSERT INTO report_figures (report_id, raw_payload_id, measure, case_definition, value,
-                            method, status, evidence, extractor_version)
-SELECT id, raw_payload_id, 'deces', 'total', 1, 'llm', 'auto', 'confirmed the death', 'llm-0'
+            """INSERT INTO report_figures (report_id, raw_payload_id, measure, case_definition, precision,
+                            value, method, status, evidence, extractor_version)
+SELECT id, raw_payload_id, 'deces', 'total', 'exact', 1, 'llm', 'auto', 'confirmed the death', 'llm-0'
 FROM reports WHERE slug = '2026-DON620';""",
             (),
         )
