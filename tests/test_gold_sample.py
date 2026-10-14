@@ -16,11 +16,14 @@ import pytest
 from fake_who import FakeWHO, fixture_records, make_record
 from observatoire import gold_sample
 from observatoire.cli import EXIT_OK, EXIT_USAGE, main
+from observatoire.db import to_utc_z
 from observatoire.gold_sample import (
-    GOLD_COLUMNS, QUOTAS, SAMPLE_COLUMNS, don_text, html_to_text, load_candidates,
-    select, split_for,
+    GOLD_COLUMNS, PRECISIONS, QUOTAS, SAMPLE_COLUMNS, load_candidates, select, split_for,
 )
 from observatoire.oms.ingest import RunSummary
+from observatoire.oms.normalize import DON_URL, display_title
+from observatoire.oms.models import DonRecord
+from observatoire.oms.text import html_to_text, report_text
 
 ROOT = Path(__file__).resolve().parents[1]
 Ingest = Callable[[FakeWHO], RunSummary]
@@ -69,7 +72,10 @@ def test_gabarit_du_jeu_de_reference_entetes_seulement() -> None:
     lines = (ROOT / "tests" / "gold" / "don_gold.csv").read_text(encoding="utf-8").splitlines()
     assert lines == [",".join(GOLD_COLUMNS)]
     assert GOLD_COLUMNS == ("don_id", "split", "pays", "maladie", "type", "valeur", "qualificatif",
-                            "cumule_ou_nouveau", "date_reference", "citation")
+                            "precision", "cumule_ou_nouveau", "date_reference", "citation")
+    assert GOLD_COLUMNS.index("precision") == GOLD_COLUMNS.index("qualificatif") + 1
+    assert PRECISIONS == ("exact", "environ", "au_moins", "au_plus", "fourchette_basse",
+                          "fourchette_haute")
 
 
 def test_split_deterministe_et_equilibre() -> None:
@@ -105,6 +111,7 @@ def test_echantillon_sur_la_fixture(
         text = Path(row["chemin_texte"]).read_text(encoding="utf-8")
         assert text.startswith(f"TITRE : {row['titre']}\n")
         assert row["url"] in text
+    assert {r["origine"] for r in rows} == {"aleatoire"}  # 5 DON < n_random : tous tirés au hasard
     somalia = Path(by_url["2022-DON398_1"]["chemin_texte"]).read_text(encoding="utf-8")
     assert "a cumulative number of 7796 cases of cholera including 37 associated deaths" in somalia
     assert "\n## Overview\n" in somalia and "<p>" not in somalia
@@ -136,10 +143,11 @@ def test_echantillon_de_40_sur_base_factice_reproductible_et_stratifie(
     assert ids == sorted(ids)
     assert first.shortfalls == {}  # chaque strate a atteint son effectif
     assert all(first.reached[k] >= QUOTAS[k] for k in QUOTAS)
-    per_disease = Counter(c.disease for c in first.chosen)
-    assert len(per_disease) == len(DISEASES)  # 16 maladies : toutes représentées
+    strata_part = [c for c in first.chosen if c.don_id not in first.random_ids]
+    per_disease = Counter(c.disease for c in strata_part)  # le tirage aléatoire, lui, est uniforme
+    assert len(strata_part) == 30 and len(per_disease) == len(DISEASES)
     assert max(per_disease.values()) - min(per_disease.values()) <= 1  # réparties au plus égal
-    assert max(per_disease.values()) <= -(-40 // len(DISEASES))  # le plafond cède quand il faut 40 DON
+    assert max(per_disease.values()) <= -(-30 // len(DISEASES))  # le plafond cède quand il faut 30 DON
     years = [int(c.published_at[:4]) for c in first.chosen]
     assert min(years) < 2015 and max(years) >= 2022
 
@@ -225,3 +233,65 @@ def test_citations_du_guide_sont_des_extraits_exacts_des_textes_exportes(
         assert "\n" not in citation
     for citation in re.findall(r"`((?:\(CFR[^`]*|more than 78 000[^`]*|2,027[^`]*|only two cases[^`]*))`", guide):
         assert any(citation in t for t in texts.values()), citation
+
+
+def test_fichier_texte_egal_a_la_sortie_de_la_fonction_unique(
+    conn: sqlite3.Connection, ingest: Ingest, tmp_path: Path
+) -> None:
+    """Le texte étiqueté est exactement `report_text` (la même fonction que l'extracteur importera)."""
+    ingest(FakeWHO(fixture_records()))
+    out = tmp_path / "a.csv"
+    gold_sample.write_sample(select(load_candidates(conn, set()), 40), out, tmp_path / "textes")
+    by_id = {r["Id"]: r for r in fixture_records()}
+    rows = read_csv(out)
+    assert {r["don_id"] for r in rows} == set(by_id)
+    for row in rows:
+        raw = by_id[row["don_id"]]
+        expected = report_text(display_title(DonRecord.model_validate(raw)),
+                               DON_URL.format(slug=raw["UrlName"]),
+                               to_utc_z(raw["PublicationDateAndTime"]), raw)
+        assert Path(row["chemin_texte"]).read_text(encoding="utf-8") == expected
+    assert "gold_sample" not in (ROOT / "src/observatoire/oms/text.py").read_text(encoding="utf-8")
+
+
+def test_n_random_tire_au_hasard_avec_la_meme_graine(populated: sqlite3.Connection) -> None:
+    candidates = load_candidates(populated, set())
+    sample = select(candidates, 40, seed=7, n_random=10)
+    assert len(sample.chosen) == 40 and len(sample.random_ids) == 10
+    assert sample.random_ids <= {c.don_id for c in sample.chosen}
+    # Le tirage ne dépend que de la graine et de l'ensemble de DON : il est stable et reproductible.
+    assert sample.random_ids == select(list(reversed(candidates)), 40, seed=7, n_random=10).random_ids
+    assert sample.random_ids == select(candidates, 20, seed=7, n_random=10).random_ids
+    assert sample.random_ids != select(candidates, 40, seed=8, n_random=10).random_ids
+    # Sans stratification : tirage uniforme, pas de quotas visés ; la partie stratifiée, elle, les tient.
+    strata_part = [c for c in sample.chosen if c.don_id not in sample.random_ids]
+    assert len(strata_part) == 30 and sample.shortfalls == {}
+    assert all(sum(k in c.flags for c in strata_part) >= QUOTAS[k] for k in QUOTAS)
+    assert select(candidates, 40, seed=7, n_random=0).random_ids == frozenset()
+    assert len(select(candidates, 40, seed=7, n_random=40).random_ids) == 40
+    with pytest.raises(ValueError, match="n_random"):
+        select(candidates, 40, n_random=41)
+
+
+def test_origine_dans_le_csv_et_option_n_random_de_la_commande(
+    populated: sqlite3.Connection, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("OBSERVATOIRE_DB", raising=False)
+    db = str(populated.execute("PRAGMA database_list").fetchone()["file"])
+    base = ["gold-sample", "--db", db, "--texts-dir", str(tmp_path / "t")]
+
+    assert main([*base, "--out", str(tmp_path / "defaut.csv")]) == EXIT_OK  # défaut : 10 au hasard
+    report = json.loads(capsys.readouterr().out)
+    rows = read_csv(tmp_path / "defaut.csv")
+    assert report["selected"] == len(rows) == 40 and report["aleatoire"] == 10
+    assert Counter(r["origine"] for r in rows) == {"aleatoire": 10, "strate": 30}
+    assert (tmp_path / "defaut.csv").read_text(encoding="utf-8").splitlines()[0] == ",".join(SAMPLE_COLUMNS)
+
+    assert main([*base, "--out", str(tmp_path / "c.csv"), "--n", "25", "--n-random", "5"]) == EXIT_OK
+    capsys.readouterr()
+    assert Counter(r["origine"] for r in read_csv(tmp_path / "c.csv")) == {"aleatoire": 5, "strate": 20}
+
+    assert main([*base, "--out", str(tmp_path / "d.csv"), "--n", "10", "--n-random", "11"]) == EXIT_USAGE
+    assert "--n-random" in capsys.readouterr().err
+    assert not (tmp_path / "d.csv").exists()

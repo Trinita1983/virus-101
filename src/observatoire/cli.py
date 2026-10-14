@@ -20,7 +20,7 @@ from observatoire import __version__
 from observatoire.config import MAX_PAGE_SIZE, WHO_API_URL, Settings, detect_code_version
 from observatoire.db import SQL_DIR, connect, init_db
 from observatoire.gold_sample import (
-    DEFAULT_SEED, DEFAULT_SIZE, fixture_ids, load_candidates, select, summary, write_sample,
+    DEFAULT_RANDOM, DEFAULT_SEED, DEFAULT_SIZE, fixture_ids, load_candidates, select, summary, write_sample,
 )
 from observatoire.oms.client import WhoClient
 from observatoire.oms.ingest import run_oms_ingestion
@@ -59,6 +59,8 @@ def build_parser() -> argparse.ArgumentParser:
     gold.add_argument("--out", default="tests/gold/a_etiqueter.csv")
     gold.add_argument("--texts-dir", default="tests/gold/textes")
     gold.add_argument("--n", type=int, default=DEFAULT_SIZE)
+    gold.add_argument("--n-random", type=int, default=DEFAULT_RANDOM,
+                      help="dont ce nombre de DON tirés au hasard, sans strates (défaut 10)")
     gold.add_argument("--seed", type=int, default=DEFAULT_SEED)
     gold.add_argument("--force", action="store_true", help="écrase un a_etiqueter.csv existant")
     gold.add_argument("--keep-fixture-dons", action="store_true",
@@ -146,7 +148,10 @@ def _gold_sample(args: argparse.Namespace) -> int:
     if not candidates:
         print("erreur : aucun DON éligible dans la base", file=sys.stderr)
         return EXIT_USAGE
-    selection = select(candidates, args.n, args.seed)
+    if not 0 <= args.n_random <= args.n:
+        print("erreur : --n-random doit être compris entre 0 et --n", file=sys.stderr)
+        return EXIT_USAGE
+    selection = select(candidates, args.n, args.seed, args.n_random)
     write_sample(selection, out, Path(args.texts_dir))
     print(json.dumps(summary(selection, len(candidates)), ensure_ascii=False, indent=2))
     return EXIT_OK

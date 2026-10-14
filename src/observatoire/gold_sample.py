@@ -18,78 +18,22 @@ import sqlite3
 from collections import Counter
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
-from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 
+from observatoire.oms.text import report_text
+
 # Colonnes du jeu de référence, alignées sur report_figures (docs/01b-arbitrage.md, point D).
 GOLD_COLUMNS = ("don_id", "split", "pays", "maladie", "type", "valeur", "qualificatif",
-                "cumule_ou_nouveau", "date_reference", "citation")
-SAMPLE_COLUMNS = ("don_id", "split", "titre", "url", "chemin_texte")
+                "precision", "cumule_ou_nouveau", "date_reference", "citation")
+SAMPLE_COLUMNS = ("don_id", "split", "titre", "url", "chemin_texte", "origine")
+PRECISIONS = ("exact", "environ", "au_moins", "au_plus", "fourchette_basse", "fourchette_haute")
 DEFAULT_SEED = 20261014
 DEFAULT_SIZE = 40
-# Champs texte de l'API OMS, dans l'ordre de lecture (docs/00-sources.md §2.2).
-TEXT_FIELDS = ("Summary", "Overview", "Epidemiology", "Assessment", "Advice", "Response",
-               "FurtherInformation")
-
-
+DEFAULT_RANDOM = 10  # DON tirés au hasard, sans stratification
 def split_for(don_id: str) -> str:
     """Split 50/50 déterministe : parité du sha256 de l'identifiant (`Id` de l'API)."""
     return "dev" if int(hashlib.sha256(don_id.encode("utf-8")).hexdigest(), 16) % 2 == 0 else "holdout"
-
-
-# --- Texte du DON ------------------------------------------------------------------------------
-
-_BLOCK = {"p", "div", "br", "li", "ul", "ol", "tr", "table", "h1", "h2", "h3", "h4", "h5", "h6"}
-
-
-class _Text(HTMLParser):
-    def __init__(self) -> None:
-        super().__init__(convert_charrefs=True)
-        self.parts: list[str] = []
-        self._skip = 0
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag in ("script", "style"):
-            self._skip += 1
-        elif tag in _BLOCK:
-            self.parts.append("\n")
-        elif tag in ("td", "th"):
-            self.parts.append(" | ")
-
-    def handle_endtag(self, tag: str) -> None:
-        if tag in ("script", "style"):
-            self._skip -= 1
-        elif tag in _BLOCK:
-            self.parts.append("\n")
-
-    def handle_data(self, data: str) -> None:
-        if not self._skip:
-            self.parts.append(data)
-
-
-def html_to_text(html: str | None) -> str:
-    """Texte brut d'un fragment HTML : un paragraphe ou un élément de liste par ligne, sans ligne vide."""
-    if not html:
-        return ""
-    parser = _Text()
-    parser.feed(html)
-    parser.close()
-    lines = [" ".join(line.replace("\xa0", " ").split()) for line in "".join(parser.parts).split("\n")]
-    return "\n".join(line for line in lines if line)
-
-
-def don_text(title: str, url: str, published_at: str, raw: dict[str, Any]) -> str:
-    """Texte à étiqueter : en-tête puis les champs texte non vides, chacun sous `## Champ`.
-
-    Les citations du jeu de référence doivent être des sous-chaînes de ce fichier.
-    """
-    parts = [f"TITRE : {title}", f"PUBLIÉ : {published_at}", f"URL : {url}"]
-    for name in TEXT_FIELDS:
-        body = html_to_text(raw.get(name)) if isinstance(raw.get(name), str) else ""
-        if body:
-            parts.append(f"\n## {name}\n{body}")
-    return "\n".join(parts) + "\n"
 
 
 # --- Heuristiques d'échantillonnage (jamais des règles d'extraction) ----------------------------
@@ -155,20 +99,31 @@ MAX_PER_DISEASE = 2
 @dataclass(frozen=True)
 class Selection:
     chosen: list[Candidate]
+    random_ids: frozenset[str]  # DON tirés au hasard ; les autres viennent des strates
     available: dict[str, int]
     reached: dict[str, int]
     shortfalls: dict[str, int]
 
 
-def select(candidates: Iterable[Candidate], n: int = DEFAULT_SIZE, seed: int = DEFAULT_SEED
-           ) -> Selection:
-    """Choix reproductible : même base, même graine, même taille -> même échantillon.
+def select(candidates: Iterable[Candidate], n: int = DEFAULT_SIZE, seed: int = DEFAULT_SEED,
+           n_random: int = DEFAULT_RANDOM) -> Selection:
+    """Choix reproductible : même base, même graine, mêmes tailles -> même échantillon.
 
-    Les strates sont remplies de la plus rare à la plus fréquente, en préférant les maladies
+    `n_random` DON sont d'abord tirés au hasard (sans strates) parmi tous les candidats, avec la
+    même graine ; les `n - n_random` autres sont choisis par strates parmi le reste. Les
+    effectifs atteints par strate ne comptent que la partie stratifiée. Les strates sont remplies de la plus rare à la plus fréquente, en préférant les maladies
     encore peu représentées (au plus `MAX_PER_DISEASE` par maladie tant que c'est possible),
     puis l'échantillon est complété par les maladies les moins représentées.
     """
+    if not 0 <= n_random <= n:
+        raise ValueError("n_random doit être compris entre 0 et n")
     pool = sorted(candidates, key=lambda c: c.don_id)
+    drawn = list(pool)
+    random.Random(seed).shuffle(drawn)
+    random_part = drawn[:n_random]
+    random_ids = frozenset(c.don_id for c in random_part)
+    pool = [c for c in pool if c.don_id not in random_ids]
+    n_strata = n - len(random_part)
     random.Random(seed).shuffle(pool)
     rank = {c.don_id: i for i, c in enumerate(pool)}
     available = {k: sum(1 for c in pool if k in c.flags) for k in QUOTAS}
@@ -178,7 +133,7 @@ def select(candidates: Iterable[Candidate], n: int = DEFAULT_SIZE, seed: int = D
     def take(options: list[Candidate], cap: int | None) -> bool:
         options = [c for c in options if c not in chosen
                    and (cap is None or per_disease[c.disease] < cap)]
-        if not options or len(chosen) >= n:
+        if not options or len(chosen) >= n_strata:
             return False
         best = min(options, key=lambda c: (per_disease[c.disease], rank[c.don_id]))
         chosen.append(best)
@@ -190,11 +145,12 @@ def select(candidates: Iterable[Candidate], n: int = DEFAULT_SIZE, seed: int = D
             if not (take([c for c in pool if key in c.flags], MAX_PER_DISEASE)
                     or take([c for c in pool if key in c.flags], None)):
                 break
-    while len(chosen) < n and (take(pool, MAX_PER_DISEASE) or take(pool, None)):
+    while len(chosen) < n_strata and (take(pool, MAX_PER_DISEASE) or take(pool, None)):
         pass
     reached = {k: sum(1 for c in chosen if k in c.flags) for k in QUOTAS}
     shortfalls = {k: QUOTAS[k] - v for k, v in reached.items() if v < QUOTAS[k]}
-    return Selection(sorted(chosen, key=lambda c: c.don_id), available, reached, shortfalls)
+    everything = sorted([*random_part, *chosen], key=lambda c: c.don_id)
+    return Selection(everything, random_ids, available, reached, shortfalls)
 
 
 # --- Base, fichiers ----------------------------------------------------------------------------
@@ -217,7 +173,7 @@ def load_candidates(conn: sqlite3.Connection, exclude: set[str]) -> list[Candida
     for r in rows:
         if r["external_id"] in exclude:
             continue
-        text = don_text(r["title"], r["url"], r["published_at"], json.loads(r["body_text"]))
+        text = report_text(r["title"], r["url"], r["published_at"], json.loads(r["body_text"]))
         out.append(Candidate(r["external_id"], r["title"], r["url"], r["published_at"], text,
                              disease_key(r["title"]),
                              strata_flags(r["title"], r["published_at"], text)))
@@ -236,12 +192,14 @@ def write_sample(selection: Selection, out_csv: Path, texts_dir: Path,
             file = texts_dir / f"{c.don_id}.txt"
             file.write_text(c.text, encoding="utf-8")
             writer.writerow([c.don_id, split_for(c.don_id), c.title, c.url,
-                             path_of(c) if path_of else file.as_posix()])
+                             path_of(c) if path_of else file.as_posix(),
+                             "aleatoire" if c.don_id in selection.random_ids else "strate"])
 
 
 def summary(selection: Selection, eligible: int) -> dict[str, Any]:
     splits = Counter(split_for(c.don_id) for c in selection.chosen)
     return {"eligible": eligible, "selected": len(selection.chosen),
+            "aleatoire": len(selection.random_ids),
             "dev": splits["dev"], "holdout": splits["holdout"],
             "strata": {k: {"quota": QUOTAS[k], "available": selection.available[k],
                            "reached": selection.reached[k]} for k in QUOTAS},
