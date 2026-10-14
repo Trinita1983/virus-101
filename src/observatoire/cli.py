@@ -1,4 +1,4 @@
-"""Points d'entrée en ligne de commande : `observatoire ingest-oms` et `observatoire db-check`.
+"""Points d'entrée en ligne de commande : `observatoire ingest-oms`, `db-check` et `gold-sample`.
 
 Codes de sortie : 0 succès (`succes` ou `inchange`), 1 échec, 2 erreur d'usage ou de
 configuration, 3 exécution `partiel` (rejets ou incohérence de comptage : écart non nul).
@@ -18,7 +18,10 @@ import httpx
 
 from observatoire import __version__
 from observatoire.config import MAX_PAGE_SIZE, WHO_API_URL, Settings, detect_code_version
-from observatoire.db import connect, init_db
+from observatoire.db import SQL_DIR, connect, init_db
+from observatoire.gold_sample import (
+    DEFAULT_SEED, DEFAULT_SIZE, fixture_ids, load_candidates, select, summary, write_sample,
+)
 from observatoire.oms.client import WhoClient
 from observatoire.oms.ingest import run_oms_ingestion
 
@@ -50,6 +53,16 @@ def build_parser() -> argparse.ArgumentParser:
     ingest.add_argument("--triggered-by", choices=("planifie", "manuel", "reprise"),
                         default="manuel")
     ingest.add_argument("--ci-run-url", default=os.environ.get("OBSERVATOIRE_CI_RUN_URL"))
+
+    gold = sub.add_parser("gold-sample", help="propose des DON à étiqueter (jeu de référence, phase 3)")
+    gold.add_argument("--db", default=db_default)
+    gold.add_argument("--out", default="tests/gold/a_etiqueter.csv")
+    gold.add_argument("--texts-dir", default="tests/gold/textes")
+    gold.add_argument("--n", type=int, default=DEFAULT_SIZE)
+    gold.add_argument("--seed", type=int, default=DEFAULT_SEED)
+    gold.add_argument("--force", action="store_true", help="écrase un a_etiqueter.csv existant")
+    gold.add_argument("--keep-fixture-dons", action="store_true",
+                      help="ne pas exclure les 5 DON de fixtures/who_don_sample.json")
 
     check = sub.add_parser("db-check", help="contrôle d'intégrité et dénombrement des DON en base")
     check.add_argument("--db", default=db_default)
@@ -116,6 +129,29 @@ def _db_check(args: argparse.Namespace) -> int:
     return EXIT_OK if healthy else EXIT_FAILED
 
 
+def _gold_sample(args: argparse.Namespace) -> int:
+    path, out = Path(args.db), Path(args.out)
+    if not path.exists():
+        print(f"erreur : base introuvable : {path}", file=sys.stderr)
+        return EXIT_USAGE
+    if out.exists() and not args.force:
+        print(f"erreur : {out} existe déjà (--force pour l'écraser)", file=sys.stderr)
+        return EXIT_USAGE
+    exclude = set() if args.keep_fixture_dons else fixture_ids(SQL_DIR.parent / "fixtures" / "who_don_sample.json")
+    conn = connect(path)
+    try:
+        candidates = load_candidates(conn, exclude)
+    finally:
+        conn.close()
+    if not candidates:
+        print("erreur : aucun DON éligible dans la base", file=sys.stderr)
+        return EXIT_USAGE
+    selection = select(candidates, args.n, args.seed)
+    write_sample(selection, out, Path(args.texts_dir))
+    print(json.dumps(summary(selection, len(candidates)), ensure_ascii=False, indent=2))
+    return EXIT_OK
+
+
 def main(argv: Sequence[str] | None = None, *,
          transport: httpx.BaseTransport | None = None) -> int:
     """Point d'entrée. `transport` ne sert qu'aux tests (transport HTTP simulé)."""
@@ -124,6 +160,8 @@ def main(argv: Sequence[str] | None = None, *,
                         format="%(asctime)s %(levelname)s %(name)s : %(message)s")
     if args.command == "ingest-oms":
         return _ingest(args, transport)
+    if args.command == "gold-sample":
+        return _gold_sample(args)
     return _db_check(args)
 
 
