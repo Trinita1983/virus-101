@@ -50,6 +50,7 @@ MANUAL_CLASSIFICATION: dict[str, dict[str, Any]] = {
 # Chiffres relevés à la main dans le texte du DON 2008_01_21-en (champ Overview).
 MANUAL_FIGURES = {
     "2008_01_21-en": {
+        "country": "IDN",
         "cases": 119,
         "deaths": 97,
         "as_of": "2008-01-21",
@@ -117,9 +118,10 @@ def display_title(record: dict[str, Any]) -> str:
 def start_run(conn: sqlite3.Connection, source: str, started: str, finished: str, **counts: int) -> int:
     cur = conn.execute(
         """INSERT INTO ingestion_runs (source_code, started_at, finished_at, status, triggered_by,
-                                       code_version, seen_count, inserted_count, updated_count)
-           VALUES (?, ?, ?, 'succes', 'manuel', 'check_schema', ?, ?, ?)""",
-        (source, started, finished, counts.get("seen", 0), counts.get("inserted", 0), counts.get("updated", 0)),
+                                       code_version, expected_count, seen_count, inserted_count, updated_count)
+           VALUES (?, ?, ?, 'succes', 'manuel', 'check_schema', ?, ?, ?, ?)""",
+        (source, started, finished, counts.get("expected"), counts.get("seen", 0), counts.get("inserted", 0),
+         counts.get("updated", 0)),
     )
     return int(cur.lastrowid)
 
@@ -146,10 +148,10 @@ def insert_dons(conn: sqlite3.Connection, records: list[dict[str, Any]], run_id:
         fig = MANUAL_FIGURES.get(rec["UrlName"])
         report_id = conn.execute(
             """INSERT INTO reports (source_code, external_id, external_ref, slug, url, title, summary,
-                                    published_at, date_quality, source_modified_at, disease_code, geo_scope,
-                                    classification_status, cases, deaths, figures_as_of, figures_method,
-                                    figures_status, figures_evidence, raw_payload_id, first_seen_at, last_seen_at)
-               VALUES ('oms_don', ?, ?, ?, ?, ?, ?, ?, 'ok', ?, ?, ?, 'valide', ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                    published_at, date_quality, disease_code, geo_scope, classification_status,
+                                    figures_payload_id, figures_extractor_version,
+                                    raw_payload_id, first_seen_run_id, last_seen_run_id)
+               VALUES ('oms_don', ?, ?, ?, ?, ?, ?, ?, 'ok', ?, ?, 'valide', ?, ?, ?, ?, ?)""",
             (
                 rec["Id"],
                 rec["DonId"] or None,
@@ -158,25 +160,34 @@ def insert_dons(conn: sqlite3.Connection, records: list[dict[str, Any]], run_id:
                 display_title(rec),
                 strip_html(rec.get("Summary")) or strip_html(rec.get("Overview")),
                 rec["PublicationDateAndTime"],
-                rec["LastModified"],
                 cls["disease"],
                 cls["scope"],
-                fig["cases"] if fig else None,
-                fig["deaths"] if fig else None,
-                fig["as_of"] if fig else None,
+                raw_id if fig else None,
                 "manuel" if fig else None,
-                "valide" if fig else "non_extrait",
-                fig["evidence"] if fig else None,
                 raw_id,
-                NOW,
-                NOW,
+                run_id,
+                run_id,
             ),
         ).lastrowid
+        conn.execute(
+            """INSERT INTO report_versions (report_id, version, source_code, external_id, raw_payload_id, run_id)
+               VALUES (?, 1, 'oms_don', ?, ?, ?)""",
+            (report_id, rec["Id"], raw_id, run_id),
+        )
         for i, iso3 in enumerate(cls["countries"]):
             conn.execute(
                 "INSERT INTO report_countries (report_id, country_iso3, is_primary) VALUES (?, ?, ?)",
                 (report_id, iso3, 1 if i == 0 else 0),
             )
+        if fig:
+            for measure, value in (("cas", fig["cases"]), ("deces", fig["deaths"])):
+                conn.execute(
+                    """INSERT INTO report_figures (report_id, raw_payload_id, country_iso3, measure,
+                                                   case_definition, as_of, value, method, status, evidence,
+                                                   extractor_version)
+                       VALUES (?, ?, ?, ?, 'confirme', ?, ?, 'manuel', 'valide', ?, 'manuel')""",
+                    (report_id, raw_id, fig["country"], measure, fig["as_of"], value, fig["evidence"]),
+                )
 
 
 def iso_week_bounds(year: int, week: int) -> tuple[str, str]:
@@ -184,16 +195,24 @@ def iso_week_bounds(year: int, week: int) -> tuple[str, str]:
     return monday.isoformat(), (monday + timedelta(days=6)).isoformat()
 
 
-def insert_observation(conn: sqlite3.Connection, series_id: int, year: int, week: int, value: float,
-                       seen_at: str, run_id: int, source_version: str) -> None:
-    """Insère une valeur ; si elle diffère de la version courante, crée une révision."""
+def insert_observation(conn: sqlite3.Connection, series_id: int, year: int, week: int, value: float | None,
+                       seen_at: str, run_id: int, source_version: str, raw_payload_id: int,
+                       value_low: float | None = None, value_up: float | None = None,
+                       value_status: str = "publiee") -> None:
+    """Insère une valeur ; si un champ versionné diffère de la version courante, crée une révision.
+
+    Champs versionnés (invariant I50) : value, value_low, value_up, value_status. Un
+    source_version différent seul n'est pas une révision. raw_payload_id : brut d'où
+    vient la valeur (I60), relu par le contrôle de relecture (D31).
+    """
     start, end = iso_week_bounds(year, week)
     current = conn.execute(
-        "SELECT version, value FROM observations WHERE series_id = ? AND period_start = ? AND valid_to IS NULL",
+        """SELECT version, value, value_low, value_up, value_status FROM observations
+           WHERE series_id = ? AND period_start = ? AND valid_to IS NULL""",
         (series_id, start),
     ).fetchone()
-    if current and current[1] == value:
-        return  # valeur inchangée : aucune ligne
+    if current and current[1:] == (value, value_low, value_up, value_status):
+        return  # republication identique : aucune ligne
     with conn:
         if current:
             conn.execute(
@@ -202,11 +221,24 @@ def insert_observation(conn: sqlite3.Connection, series_id: int, year: int, week
             )
         conn.execute(
             """INSERT INTO observations (series_id, period_start, period_end, iso_year, iso_week, version,
-                                         value, source_version, valid_from, run_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (series_id, start, end, year, week, (current[0] + 1) if current else 1, value,
-             source_version, seen_at, run_id),
+                                         value, value_low, value_up, value_status, source_version, valid_from, run_id,
+                                         raw_payload_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (series_id, start, end, year, week, (current[0] + 1) if current else 1, value, value_low, value_up,
+             value_status, source_version, seen_at, run_id, raw_payload_id),
         )
+
+
+def insert_raw(conn: sqlite3.Connection, source: str, resource_key: str, body: str, run_id: int,
+               retrieved_at: str) -> int:
+    """Archive un contenu brut (JSON ou CSV en clair) et renvoie son identifiant."""
+    data = body.encode("utf-8")
+    return int(conn.execute(
+        """INSERT INTO raw_payloads (source_code, resource_key, request_url, content_type, sha256, byte_size,
+                                     body_text, first_run_id, retrieved_at)
+           VALUES (?, ?, 'https://example.invalid', 'text/csv', ?, ?, ?, ?, ?)""",
+        (source, resource_key, hashlib.sha256(data).hexdigest(), len(data), body, run_id, retrieved_at),
+    ).lastrowid)
 
 
 def expect_error(rep: Report, conn: sqlite3.Connection, label: str, query: str, params: tuple[Any, ...]) -> None:
@@ -239,16 +271,17 @@ def validate(rep: Report) -> None:
         # --- Échantillon OMS ---------------------------------------------------
         records = json.loads(FIXTURE.read_text(encoding="utf-8"))["value"]
         with conn:
-            run_oms = start_run(conn, "oms_don", "2026-10-13T17:59:00Z", NOW, seen=len(records), inserted=len(records))
+            run_oms = start_run(conn, "oms_don", "2026-10-13T17:59:00Z", NOW, expected=len(records),
+                                seen=len(records), inserted=len(records))
             insert_dons(conn, records, run_oms)
 
         rep.add("## 2. Les 5 DON de l'échantillon\n")
         q = """SELECT r.slug, r.external_ref, r.title, substr(r.published_at, 1, 10) AS publie_le,
-       r.disease_code, r.geo_scope, group_concat(c.country_iso3) AS pays,
-       r.cases, r.deaths, r.figures_status
+       r.disease_code, r.geo_scope,
+       (SELECT group_concat(c.country_iso3) FROM report_countries AS c WHERE c.report_id = r.id) AS pays,
+       (SELECT group_concat(f.measure || ' ' || f.value || ' (' || f.status || ')')
+        FROM report_figures_current AS f WHERE f.report_id = r.id) AS chiffres
 FROM reports AS r
-LEFT JOIN report_countries AS c ON c.report_id = r.id
-GROUP BY r.id
 ORDER BY r.published_at DESC;"""
         rep.sql(q)
         rep.table(conn.execute(q))
@@ -262,13 +295,18 @@ ORDER BY r.published_at DESC;"""
                        'pour 100 000 habitants', 'syndromique', 'consultation')"""
         ).lastrowid
         conn.commit()
-        run_a = start_run(conn, "sentinelles", "2026-09-30T17:17:00Z", "2026-09-30T17:18:00Z", inserted=2)
-        insert_observation(conn, series_id, 2026, 38, 50.0, "2026-09-30T17:18:00Z", run_a, "v-a")
-        insert_observation(conn, series_id, 2026, 39, 60.0, "2026-09-30T17:18:00Z", run_a, "v-a")
-        run_b = start_run(conn, "sentinelles", "2026-10-07T17:17:00Z", "2026-10-07T17:18:00Z", inserted=1, updated=1)
-        insert_observation(conn, series_id, 2026, 38, 50.0, "2026-10-07T17:18:00Z", run_b, "v-b")  # inchangée
-        insert_observation(conn, series_id, 2026, 39, 63.0, "2026-10-07T17:18:00Z", run_b, "v-b")  # révision
-        insert_observation(conn, series_id, 2026, 40, 70.0, "2026-10-07T17:18:00Z", run_b, "v-b")  # nouvelle
+        # valid_from = début de l'exécution (invariant I24)
+        run_a = start_run(conn, "sentinelles", "2026-09-30T17:18:00Z", "2026-09-30T17:19:00Z", inserted=2)
+        raw_a = insert_raw(conn, "sentinelles", "inc-3-PAY-ds2", "week,inc100\n202638,50\n202639,60", run_a,
+                           "2026-09-30T17:18:00Z")
+        insert_observation(conn, series_id, 2026, 38, 50.0, "2026-09-30T17:18:00Z", run_a, "v-a", raw_a)
+        insert_observation(conn, series_id, 2026, 39, 60.0, "2026-09-30T17:18:00Z", run_a, "v-a", raw_a)
+        run_b = start_run(conn, "sentinelles", "2026-10-07T17:18:00Z", "2026-10-07T17:19:00Z", inserted=1, updated=1)
+        raw_b = insert_raw(conn, "sentinelles", "inc-3-PAY-ds2", "week,inc100\n202638,50\n202639,63\n202640,70",
+                           run_b, "2026-10-07T17:18:00Z")
+        insert_observation(conn, series_id, 2026, 38, 50.0, "2026-10-07T17:18:00Z", run_b, "v-b", raw_b)  # inchangée
+        insert_observation(conn, series_id, 2026, 39, 63.0, "2026-10-07T17:18:00Z", run_b, "v-b", raw_b)  # révision
+        insert_observation(conn, series_id, 2026, 40, 70.0, "2026-10-07T17:18:00Z", run_b, "v-b", raw_b)  # nouvelle
         conn.commit()
 
         rep.add("## 3. Observations hebdomadaires fictives\n")
@@ -344,37 +382,39 @@ WHERE r.disease_code = 'cholera'
         expect_error(
             rep, conn, "Doublon de DON (même Id OMS)",
             """INSERT INTO reports (source_code, external_id, slug, url, title, published_at, date_quality,
-                     geo_scope, classification_status, raw_payload_id, first_seen_at, last_seen_at)
+                     geo_scope, classification_status, raw_payload_id, first_seen_run_id, last_seen_run_id)
 VALUES ('oms_don', ?, 'autre-slug', 'https://example.invalid', 'doublon', ?, 'ok',
         'inconnu', 'non_classe', 1, ?, ?);""",
-            (first["Id"], first["PublicationDateAndTime"], NOW, NOW),
+            (first["Id"], first["PublicationDateAndTime"], run_oms, run_oms),
         )
         expect_error(
             rep, conn, "Doublon de version d'observation (S39, version 2)",
             """INSERT INTO observations (series_id, period_start, period_end, iso_year, iso_week, version,
-                          value, valid_from, valid_to, run_id)
-VALUES (?, '2026-09-21', '2026-09-27', 2026, 39, 2, 99, ?, ?, ?);""",
-            (series_id, NOW, NOW, run_b),
+                          value, valid_from, valid_to, run_id, raw_payload_id)
+VALUES (?, '2026-09-21', '2026-09-27', 2026, 39, 2, 99, ?, ?, ?, ?);""",
+            (series_id, "2026-10-07T17:18:00Z", NOW, run_b, raw_b),
         )
         expect_error(
             rep, conn, "Deuxième version courante sans fermer la précédente (S40)",
             """INSERT INTO observations (series_id, period_start, period_end, iso_year, iso_week, version,
-                          value, valid_from, run_id)
-VALUES (?, '2026-09-28', '2026-10-04', 2026, 40, 2, 71, ?, ?);""",
-            (series_id, NOW, run_b),
+                          value, valid_from, run_id, raw_payload_id)
+VALUES (?, '2026-09-28', '2026-10-04', 2026, 40, 2, 71, ?, ?, ?);""",
+            (series_id, NOW, run_b, raw_b),
         )
         expect_error(
             rep, conn, "Chiffres extraits par LLM marqués « auto »",
-            """UPDATE reports SET cases = 10, figures_method = 'llm', figures_status = 'auto'
-WHERE slug = '2026-DON620';""",
+            """INSERT INTO report_figures (report_id, raw_payload_id, measure, case_definition, value,
+                            method, status, evidence, extractor_version)
+SELECT id, raw_payload_id, 'deces', 'total', 1, 'llm', 'auto', 'confirmed the death', 'llm-0'
+FROM reports WHERE slug = '2026-DON620';""",
             (),
         )
         expect_error(
             rep, conn, "Clé étrangère vers une série inexistante",
             """INSERT INTO observations (series_id, period_start, period_end, iso_year, iso_week, version,
-                          value, valid_from, run_id)
-VALUES (999, '2026-09-28', '2026-10-04', 2026, 40, 1, 1, ?, ?);""",
-            (NOW, run_b),
+                          value, valid_from, run_id, raw_payload_id)
+VALUES (999, '2026-09-28', '2026-10-04', 2026, 40, 1, 1, ?, ?, ?);""",
+            (NOW, run_b, raw_b),
         )
         body = canonical_json(first)
         expect_error(
@@ -388,6 +428,12 @@ ON CONFLICT (source_code, resource_key, sha256) DO NOTHING;""",
         )
         count = conn.execute("SELECT count(*) FROM raw_payloads").fetchone()[0]
         rep.add(f"Après la relance : {count} lignes dans `raw_payloads` (5 attendues).\n")
+
+        rep.add("### 4.5 Contrôle des invariants\n")
+        rep.add("Vue qui doit être vide avant tout envoi de la base (voir `docs/01-invariants.md`) :\n")
+        q = "SELECT invariant, table_name, row_id FROM controle_invariants;"
+        rep.sql(q)
+        rep.table(conn.execute(q))
         conn.close()
 
 
@@ -405,6 +451,13 @@ def measure_volume(rep: Report) -> None:
         t0 = time.perf_counter()
         with conn:
             run_id = start_run(conn, "spf_odisse", "2026-10-13T00:00:00Z", NOW)
+            run_oms = start_run(conn, "oms_don", "2026-10-13T00:00:00Z", NOW, expected=n_reports, seen=n_reports)
+            conn.executemany(
+                """INSERT INTO datasets (source_code, dataset, license_name, license_evidence, license_checked_at,
+                                         is_publishable, publishable_since)
+                   VALUES (?, ?, 'Licence Ouverte 2.0', 'verification_manuelle', ?, 1, ?)""",
+                [(source, f"jeu-{j}", NOW, NOW) for source in ("sentinelles", "spf_odisse") for j in range(8)],
+            )
             series_rows = []
             for i in range(sentinel_series + odisse_series):
                 source = "sentinelles" if i < sentinel_series else "spf_odisse"
@@ -417,6 +470,7 @@ def measure_volume(rep: Report) -> None:
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 series_rows,
             )
+            raw_id = insert_raw(conn, "spf_odisse", "jeu-0", "export synthétique", run_id, NOW)
             obs = []
             for sid in range(1, sentinel_series + odisse_series + 1):
                 weeks = sentinel_weeks if sid <= sentinel_series else odisse_weeks
@@ -427,14 +481,14 @@ def measure_volume(rep: Report) -> None:
                     revised = (sid * 7919 + w) % 100 < revision_rate * 100
                     obs.append((sid, d.isoformat(), (d + timedelta(days=6)).isoformat(), y, wk, 1,
                                 123.456789 + w, "v1", "2026-01-01T00:00:00Z",
-                                "2026-02-01T00:00:00Z" if revised else None, run_id))
+                                "2026-02-01T00:00:00Z" if revised else None, run_id, raw_id))
                     if revised:
                         obs.append((sid, d.isoformat(), (d + timedelta(days=6)).isoformat(), y, wk, 2,
-                                    124.5 + w, "v2", "2026-02-01T00:00:00Z", None, run_id))
+                                    124.5 + w, "v2", "2026-02-01T00:00:00Z", None, run_id, raw_id))
             conn.executemany(
                 """INSERT INTO observations (series_id, period_start, period_end, iso_year, iso_week, version,
-                       value, source_version, valid_from, valid_to, run_id)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       value, source_version, valid_from, valid_to, run_id, raw_payload_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 obs,
             )
             # Les DON de l'échantillon sont plus gros que la moyenne réelle (6 466 caractères,
@@ -446,13 +500,20 @@ def measure_volume(rep: Report) -> None:
                     """INSERT INTO raw_payloads (source_code, resource_key, request_url, content_type, sha256,
                            byte_size, body_text, first_run_id, retrieved_at)
                        VALUES ('oms_don', ?, 'u', 'application/json', ?, ?, ?, ?, ?)""",
-                    (f"id-{i}", hashlib.sha256(body.encode()).hexdigest(), len(body), body, run_id, NOW),
+                    (f"id-{i}", hashlib.sha256(body.encode()).hexdigest(), len(body), body, run_oms, NOW),
+                ).lastrowid
+                report_id = conn.execute(
+                    """INSERT INTO reports (source_code, external_id, slug, url, title, summary, published_at,
+                           date_quality, geo_scope, classification_status, raw_payload_id,
+                           first_seen_run_id, last_seen_run_id)
+                       VALUES ('oms_don', ?, ?, 'u', 'titre', ?, ?, 'ok', 'inconnu', 'non_classe', ?, ?, ?)""",
+                    (f"id-{i}", f"slug-{i}", "x" * 300, NOW, raw_id, run_oms, run_oms),
                 ).lastrowid
                 conn.execute(
-                    """INSERT INTO reports (source_code, external_id, slug, url, title, summary, published_at,
-                           date_quality, geo_scope, classification_status, raw_payload_id, first_seen_at, last_seen_at)
-                       VALUES ('oms_don', ?, ?, 'u', 'titre', ?, ?, 'ok', 'inconnu', 'non_classe', ?, ?, ?)""",
-                    (f"id-{i}", f"slug-{i}", "x" * 300, NOW, raw_id, NOW, NOW),
+                    """INSERT INTO report_versions (report_id, version, source_code, external_id, raw_payload_id,
+                                                    run_id)
+                       VALUES (?, 1, 'oms_don', ?, ?, ?)""",
+                    (report_id, f"id-{i}", raw_id, run_oms),
                 )
         conn.execute("VACUUM")
         elapsed = time.perf_counter() - t0

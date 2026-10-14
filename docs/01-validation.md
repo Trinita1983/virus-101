@@ -16,44 +16,53 @@ SELECT type, name FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY typ
 | type | name |
 |---|---|
 | index | ingestion_runs_by_source |
+| index | ingestion_runs_one_running |
 | index | observations_one_current |
 | index | report_countries_by_country |
 | index | report_countries_one_primary |
+| index | report_figures_by_report |
+| index | report_figures_one_value |
 | index | reports_by_date |
 | index | reports_by_disease_date |
 | table | alerts_log |
 | table | anomalies |
+| table | datasets |
 | table | diseases |
 | table | ingestion_runs |
 | table | observations |
 | table | raw_payloads |
 | table | report_countries |
+| table | report_figures |
+| table | report_versions |
 | table | reports |
 | table | series |
 | table | sources |
+| view | controle_invariants |
 | view | observations_current |
+| view | report_figures_current |
 | view | reports_active |
+| view | reports_presence |
 
-18 ligne(s).
+27 ligne(s).
 
 ## 2. Les 5 DON de l'échantillon
 
 ```sql
 SELECT r.slug, r.external_ref, r.title, substr(r.published_at, 1, 10) AS publie_le,
-       r.disease_code, r.geo_scope, group_concat(c.country_iso3) AS pays,
-       r.cases, r.deaths, r.figures_status
+       r.disease_code, r.geo_scope,
+       (SELECT group_concat(c.country_iso3) FROM report_countries AS c WHERE c.report_id = r.id) AS pays,
+       (SELECT group_concat(f.measure || ' ' || f.value || ' (' || f.status || ')')
+        FROM report_figures_current AS f WHERE f.report_id = r.id) AS chiffres
 FROM reports AS r
-LEFT JOIN report_countries AS c ON c.report_id = r.id
-GROUP BY r.id
 ORDER BY r.published_at DESC;
 ```
-| slug | external_ref | title | publie_le | disease_code | geo_scope | pays | cases | deaths | figures_status |
-|---|---|---|---|---|---|---|---|---|---|
-| 2026-DON620 | 2026-DON620 | Pneumonia of undetermined etiology - the Russian Federation | 2026-10-10 | pneumonie_indeterminee | pays | RUS | NULL | NULL | non_extrait |
-| 2024-DON528 | 2024-DON528 | Mpox – African Region | 2024-08-22 | mpox | region | NULL | NULL | NULL | non_extrait |
-| 2022-DON398_1 | 2022-DON398 | Cholera – Somalia | 2022-07-20 | cholera | pays | SOM | NULL | NULL | non_extrait |
-| 2008_01_21-en | NULL | Avian influenza – situation in Indonesia – update 32 | 2008-01-21 | grippe_aviaire | pays | IDN | 119 | 97 | valide |
-| 1996_01_22a-en | NULL | 1996 - Global Cholera Update | 1996-01-22 | cholera | mondial | NULL | NULL | NULL | non_extrait |
+| slug | external_ref | title | publie_le | disease_code | geo_scope | pays | chiffres |
+|---|---|---|---|---|---|---|---|
+| 2026-DON620 | 2026-DON620 | Pneumonia of undetermined etiology - the Russian Federation | 2026-10-10 | pneumonie_indeterminee | pays | RUS | NULL |
+| 2024-DON528 | 2024-DON528 | Mpox – African Region | 2024-08-22 | mpox | region | NULL | NULL |
+| 2022-DON398_1 | 2022-DON398 | Cholera – Somalia | 2022-07-20 | cholera | pays | SOM | NULL |
+| 2008_01_21-en | NULL | Avian influenza – situation in Indonesia – update 32 | 2008-01-21 | grippe_aviaire | pays | IDN | cas 119 (valide),deces 97 (valide) |
+| 1996_01_22a-en | NULL | 1996 - Global Cholera Update | 1996-01-22 | cholera | mondial | NULL | NULL |
 
 5 ligne(s).
 
@@ -189,7 +198,7 @@ Le bulletin de 1996 sortirait à tort dans une recherche sur 2021. Avec `publish
 
 ```sql
 INSERT INTO reports (source_code, external_id, slug, url, title, published_at, date_quality,
-                     geo_scope, classification_status, raw_payload_id, first_seen_at, last_seen_at)
+                     geo_scope, classification_status, raw_payload_id, first_seen_run_id, last_seen_run_id)
 VALUES ('oms_don', ?, 'autre-slug', 'https://example.invalid', 'doublon', ?, 'ok',
         'inconnu', 'non_classe', 1, ?, ?);
 ```
@@ -199,8 +208,8 @@ Résultat : rejeté, `sqlite3.IntegrityError: UNIQUE constraint failed: reports.
 
 ```sql
 INSERT INTO observations (series_id, period_start, period_end, iso_year, iso_week, version,
-                          value, valid_from, valid_to, run_id)
-VALUES (?, '2026-09-21', '2026-09-27', 2026, 39, 2, 99, ?, ?, ?);
+                          value, valid_from, valid_to, run_id, raw_payload_id)
+VALUES (?, '2026-09-21', '2026-09-27', 2026, 39, 2, 99, ?, ?, ?, ?);
 ```
 Résultat : rejeté, `sqlite3.IntegrityError: UNIQUE constraint failed: observations.series_id, observations.period_start, observations.version`
 
@@ -208,25 +217,27 @@ Résultat : rejeté, `sqlite3.IntegrityError: UNIQUE constraint failed: observat
 
 ```sql
 INSERT INTO observations (series_id, period_start, period_end, iso_year, iso_week, version,
-                          value, valid_from, run_id)
-VALUES (?, '2026-09-28', '2026-10-04', 2026, 40, 2, 71, ?, ?);
+                          value, valid_from, run_id, raw_payload_id)
+VALUES (?, '2026-09-28', '2026-10-04', 2026, 40, 2, 71, ?, ?, ?);
 ```
 Résultat : rejeté, `sqlite3.IntegrityError: UNIQUE constraint failed: observations.series_id, observations.period_start`
 
 **Chiffres extraits par LLM marqués « auto »**
 
 ```sql
-UPDATE reports SET cases = 10, figures_method = 'llm', figures_status = 'auto'
-WHERE slug = '2026-DON620';
+INSERT INTO report_figures (report_id, raw_payload_id, measure, case_definition, value,
+                            method, status, evidence, extractor_version)
+SELECT id, raw_payload_id, 'deces', 'total', 1, 'llm', 'auto', 'confirmed the death', 'llm-0'
+FROM reports WHERE slug = '2026-DON620';
 ```
-Résultat : rejeté, `sqlite3.IntegrityError: CHECK constraint failed: figures_method <> 'llm' OR figures_status IN ('incertain', 'valide')`
+Résultat : rejeté, `sqlite3.IntegrityError: CHECK constraint failed: method <> 'llm' OR status IN ('incertain', 'valide')`
 
 **Clé étrangère vers une série inexistante**
 
 ```sql
 INSERT INTO observations (series_id, period_start, period_end, iso_year, iso_week, version,
-                          value, valid_from, run_id)
-VALUES (999, '2026-09-28', '2026-10-04', 2026, 40, 1, 1, ?, ?);
+                          value, valid_from, run_id, raw_payload_id)
+VALUES (999, '2026-09-28', '2026-10-04', 2026, 40, 1, 1, ?, ?, ?);
 ```
 Résultat : rejeté, `sqlite3.IntegrityError: FOREIGN KEY constraint failed`
 
@@ -240,7 +251,19 @@ ON CONFLICT (source_code, resource_key, sha256) DO NOTHING;
 ```
 Résultat : **aucune erreur**, 0 ligne(s) modifiée(s).
 
-Après la relance : 5 lignes dans `raw_payloads` (5 attendues).
+Après la relance : 7 lignes dans `raw_payloads` (5 attendues).
+
+### 4.5 Contrôle des invariants
+
+Vue qui doit être vide avant tout envoi de la base (voir `docs/01-invariants.md`) :
+
+```sql
+SELECT invariant, table_name, row_id FROM controle_invariants;
+```
+| invariant | table_name | row_id |
+|---|---|---|
+
+0 ligne(s).
 
 ## 5. Mesure de volume (base synthétique)
 
@@ -251,7 +274,7 @@ Hypothèses (estimation, à confirmer en phase 2) : Sentinelles 4 indicateurs he
 | Séries | 1 480 |
 | Lignes `observations` | 496 770 |
 | JSON brut OMS | 15.4 Mo |
-| Taille du fichier SQLite (après VACUUM) | 82.2 Mo |
-| Taille compressée (gzip -6) | 10.2 Mo |
-| Temps de remplissage | 4.9 s |
+| Taille du fichier SQLite (après VACUUM) | 86.7 Mo |
+| Taille compressée (gzip -6) | 10.5 Mo |
+| Temps de remplissage | 7.5 s |
 
