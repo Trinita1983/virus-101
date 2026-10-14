@@ -47,6 +47,51 @@ VALUES
  'hebdomadaire', 14, 1,
  'Seuls les jeux dont la métadonnée license vaut « Licence ouverte 2.0 » sont ingérés ; les 35 jeux sans licence sont exclus (décision 2026-10-13).');
 
+-- Jeux de données dont la licence a été vérifiée à la main en phase 0
+-- (docs/00-sources.md §3.4 et §4.2, 2026-10-13). La première exécution Odissé
+-- revérifie la licence dans le catalogue et passe la preuve à 'catalogue_api'.
+-- Fenêtre de publication ouverte à la date de cette vérification (publishable_since).
+-- Les jeux sans licence déclarée sont inscrits comme jamais publiables (D27, D30, I54).
+INSERT INTO datasets (source_code, dataset, license_name, license_url, license_evidence,
+                      license_checked_at, license_note, is_publishable, publishable_since)
+VALUES
+('sentinelles', 'inc-3-PAY-ds2', 'Conditions d''utilisation des données Sentinelles (usage non commercial)',
+ 'https://www.sentiweb.fr/france/fr/?page=database', 'verification_manuelle', '2026-10-13T00:00:00Z',
+ 'Page « Conditions d''utilisation des données » datée du 28/05/2024 ; v1 sans publicité.', 1, '2026-10-13T00:00:00Z'),
+('spf_odisse', 'grippe-passages-aux-urgences-et-actes-sos-medecins-france', 'Licence Ouverte 2.0',
+ 'https://www.data.gouv.fr/pages/legal/licences/etalab-2.0', 'verification_manuelle', '2026-10-13T00:00:00Z',
+ 'Métadonnée license du catalogue Odissé lue en phase 0.', 1, '2026-10-13T00:00:00Z'),
+('spf_odisse', 'bronchiolite-passages-aux-urgences-et-actes-sos-medecins-france', 'Licence Ouverte 2.0',
+ 'https://www.data.gouv.fr/pages/legal/licences/etalab-2.0', 'verification_manuelle', '2026-10-13T00:00:00Z',
+ 'Métadonnée license du catalogue Odissé lue en phase 0.', 1, '2026-10-13T00:00:00Z'),
+('spf_odisse', 'covid-19-passages-aux-urgences-et-actes-sos-medecins-france', 'Licence Ouverte 2.0',
+ 'https://www.data.gouv.fr/pages/legal/licences/etalab-2.0', 'verification_manuelle', '2026-10-13T00:00:00Z',
+ 'Métadonnée license du catalogue Odissé lue en phase 0.', 1, '2026-10-13T00:00:00Z'),
+('spf_odisse', 'infections-respiratoires-aigues-ira-passages-aux-urgences-et-actes-sos-medecins-france',
+ 'Licence Ouverte 2.0', 'https://www.data.gouv.fr/pages/legal/licences/etalab-2.0', 'verification_manuelle',
+ '2026-10-13T00:00:00Z', 'Métadonnée license du catalogue Odissé lue en phase 0.', 1, '2026-10-13T00:00:00Z'),
+('spf_odisse', 'mpox-incidence-selon-lage-france', 'Licence Ouverte 2.0',
+ 'https://www.data.gouv.fr/pages/legal/licences/etalab-2.0', 'verification_manuelle', '2026-10-13T00:00:00Z',
+ 'Métadonnée license du catalogue Odissé lue en phase 0.', 1, '2026-10-13T00:00:00Z'),
+('spf_odisse', 'rougeole-donnees-declaration-obligatoire', 'Licence Ouverte 2.0',
+ 'https://www.data.gouv.fr/pages/legal/licences/etalab-2.0', 'verification_manuelle', '2026-10-13T00:00:00Z',
+ 'Métadonnée license du catalogue Odissé lue en phase 0.', 1, '2026-10-13T00:00:00Z'),
+('spf_odisse', 'legionellose-donnees-declaration-obligatoire', 'Licence Ouverte 2.0',
+ 'https://www.data.gouv.fr/pages/legal/licences/etalab-2.0', 'verification_manuelle', '2026-10-13T00:00:00Z',
+ 'Métadonnée license du catalogue Odissé lue en phase 0.', 1, '2026-10-13T00:00:00Z'),
+('spf_odisse', 'arboviroses-donnees-declaration-obligatoire', 'Licence Ouverte 2.0',
+ 'https://www.data.gouv.fr/pages/legal/licences/etalab-2.0', 'verification_manuelle', '2026-10-13T00:00:00Z',
+ 'Métadonnée license du catalogue Odissé lue en phase 0.', 1, '2026-10-13T00:00:00Z');
+
+INSERT INTO datasets (source_code, dataset, license_name, license_evidence, license_checked_at,
+                      license_note, is_publishable)
+SELECT 'spf_odisse', d, NULL, 'verification_manuelle', '2026-10-13T00:00:00Z',
+       'Aucune licence déclarée dans le catalogue (phase 0) : exclu de la v1.', 0
+FROM (SELECT 'ira-virologie-renal' AS d UNION ALL SELECT 'ira-virologie-relab'
+      UNION ALL SELECT 'ira-seuils' UNION ALL SELECT 'ira-ville-rusmg'
+      UNION ALL SELECT 'ira-virologie-rusmg' UNION ALL SELECT 'ira-point-de-situation'
+      UNION ALL SELECT 'ma-region-epidemies-hivernales-grippe');
+
 -- Référentiel des maladies : liste initiale, à compléter avec les règles de
 -- classification des titres OMS (phase 3).
 INSERT INTO diseases (code, label_fr, label_en) VALUES
